@@ -4,7 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
                                         #ПОСТОЯННЫЕ
-f_0 = 10.23*1e6 #номинальная частота
+n = 4.4647/1e10
+f_0 = 10.23*1e6*(1+n) #номинальная частота c учетом релятивистского влияния
 fCA = f_0/10 #частота СА
 f1 = f_0*154 #частота L1
 f2 = f_0*120 #частота L2
@@ -34,20 +35,20 @@ def get_code(code_length, bits):
         CA[np.where(CA < 1)] = -1
     return CA
 
-#TODO add PRN                                            
+#спутники                                           
 def get_code_prn(code_length, prn):
     bits = (2-1,6-1), (3-1,7-1), (4-1,8-1), (5-1,9-1), (1-1,9-1), (2-1,10-1), (1-1,8-1), (2-1,9-1), (3-1,10-1), (2-1,3-1), (3-1,4-1), (5-1,6-1), (-1,7-1), (7-1,8-1), (8-1,9-1), (9-1,10-1), (1-1,4-1), (2-1,5-1), (3-1,6-1), (4-1,7-1), (5-1,8-1), (6-1,9-1), (1-1,3-1), (4-1,6-1), (5-1,7-1), (6-1,8-1), (7-1,9-1), (8-1,10-1), (1-1,6-1), (2-1,7-1), (3-1,8-1), (4-1,9-1) # make for prh
     return get_code(code_length, bits[prn-1]) #возвращает СА код
 
 #угол возвышения спутника
-def get_elevation(): #prn, ti
+def get_elevation(alpha): #prn, ti
     #MAKE ccalculations
-    return 20*np.pi/180 #возвращает угол в радианах
+    return alpha*np.pi/180 #возвращает угол в радианах
 
 #модулированный сигнал для интегрирования
-def get_signal(ti, CA, fc): #сигнал со спутника модулированный для интегрирования
-    elevation = get_elevation()
-    dop = 2*v*np.cos(elevation)/c
+def get_signal(ti, CA, fc, alpha): #сигнал со спутника модулированный для интегрирования
+    elevation = get_elevation(alpha)
+    dop = v*np.cos(elevation)/c
     fc = fc + fc*dop #частота несущей
     t_bit = 1/(fCA + fCA*dop) #длительность бита
     ibit = int(ti/t_bit) #номер бита
@@ -56,15 +57,13 @@ def get_signal(ti, CA, fc): #сигнал со спутника модулиро
     return signal_mod
 
 #ДЕМОДУЛЯЦИЯ
-def detector_phase(code_length, prn, fc, wch, wlen, step1): # wch=6, wlen=3, step=1/10
-    CA = get_code_prn(code_length + 10, prn)
-    """
-    wch - кол-во периодов несущего сигнала                            
-    """
+#детектор фазы
+def detector_phase(code_length, prn, fc, wch, wlen, step1, alpha):
+    CA = get_code_prn(code_length, prn)
     t = []
     ca_bit_phase_t = []
     position_0 = 0
-    for i in range(1, code_length + 10): #для области интегрирования около примерной смены фазы
+    for i in range(1, code_length): #для области интегрирования около примерной смены фазы
         chunck_i_position = position_0 + 1/fCA*i - 1/fc*wch/2 #начало области
         chunck_length = 1/fc*wch #длина бласти                                              
         length_window_all = 1/fc*wlen #длина окон интегрирования                             
@@ -73,27 +72,26 @@ def detector_phase(code_length, prn, fc, wch, wlen, step1): # wch=6, wlen=3, ste
             s = chunck_i_position + step*j #начало 1 окна
             m = chunck_i_position + step*j + length_window_all/2 #конец 1, начало 2 окон
             f = chunck_i_position + step*j + length_window_all #конец 2 окна
-            integ_window_1 = integrate.quad(get_signal, s, m, args=(CA,fc)) #интегрирование 1 окна от s до m
-            integ_window_2 = integrate.quad(get_signal, m, f, args=(CA,fc)) #интегрирование 2 окна от m до f
+            integ_window_1 = integrate.quad(get_signal, s, m, args=(CA,fc, alpha)) #интегрирование 1 окна от s до m
+            integ_window_2 = integrate.quad(get_signal, m, f, args=(CA,fc, alpha)) #интегрирование 2 окна от m до f
             if integ_window_1[0]*integ_window_2[0] > 0: #условие для фазы
-
                 if integ_window_1[0] > 0 and integ_window_2[0] > 0: #условие для знака бита (1 или -1)
                     ca_bit_phase = 1
                 elif integ_window_1[0] < 0 and integ_window_2[0] < 0:
                     ca_bit_phase = -1
-                
+
                 ca_bit_phase_t.append(ca_bit_phase) #создание массива битов (1 и -1)
                 t.append(f - (1/fc)/2) #время, где меняется фаза
-                position_0 = f - (1/fCA)*i - (1/fc)/2 #сдвиг начальной позиции
+                position_0 = f - (1/fCA)*i - step # сдвиг начальной позиции (1/fc)
                 break
-    return  t, ca_bit_phase_t
+    return  t, ca_bit_phase_t, CA
 
 #восстановление кода
-def restore_code(code_length, prn, fc, wch, wlen, step1):
-    t, ca_bit_phase_t = detector_phase(code_length, prn, fc, wch, wlen, step1)
+def restore_code(code_length, prn, fc, wch, wlen, step1, alpha):
+    t, ca_bit_phase_t, CA = detector_phase(code_length, prn, fc, wch, wlen, step1, alpha)
     quantity_bit_all = []
-    t_i = []
     ca_bit = [] #востановленный код
+
     def get_CA_bit(t, fCA): #функция определения кол-во битов между фазами
         t = [0] + t #добавление начала времени
         for j in range(0, len(t)-1):
@@ -102,72 +100,134 @@ def restore_code(code_length, prn, fc, wch, wlen, step1):
             quantity_bit_all.append(quantity_bit) #массив кол-ва битов между фазами
         return quantity_bit_all
     quantity_bit_all = get_CA_bit(t, fCA) #вызываем функцию определения кол-во битов
+
     for k in range(0, len(ca_bit_phase_t)-1):
         ca_bit += sorted([ca_bit_phase_t[k]]*quantity_bit_all[k])
-    for i in range(0, len(t)-1):
-        if t[i] < code_length*1/fCA + 6/fc:
-            t_i.append(t[i]) 
-    ca_bit = ca_bit[0:code_length]
-    return t_i, ca_bit
+    for i in range(0, int(len(CA)-len(ca_bit))):
+        n = ca_bit[-1]*(-1)
+        ca_bit.append(n)
+    return t, ca_bit
+#t_i - массив вос-х фаз (во временной оси)
+#ca_bit - массив вос-х битов
 
 #битовая ошибка
-def error_CA(code_length, prn, fc, wch, wlen, step1):
-    t_i, ca_bit = restore_code(code_length, prn, fc, wch, wlen, step1)
+def error_CA(code_length, prn, fc, wch, wlen, step1, alpha):
+    t, ca_bit = restore_code(code_length, prn, fc, wch, wlen, step1, alpha)
     CA = get_code_prn(code_length, prn)
     error_bit = 0
     for i in range(0, len(ca_bit)):
         if CA[i] != ca_bit[i]:
             error_bit +=1
     return error_bit, CA, ca_bit
+#error_bit - кол-во бит-х ошибок
+#CA - массив эт-х элементов кода
+#ca_bit - массив вос-х элементов кода
 
-def error_phase(code_length, prn, fc, wch, wlen, step1):
+def error_phase(code_length, prn, fc, wch, wlen, step1, alpha):
+
     #эталонные значения
-    def t_bit_signal(fc): 
-        elevation = get_elevation()
-        dop = 2*v*np.cos(elevation)/c
-        fd = fc + fc*dop #частота несущей с доблером
+    def t_bit_signal(fd, alpha): 
+        elevation = get_elevation(alpha)
+        dop = v*np.cos(elevation)/c
+        fd = fd + fd*dop #частота несущей с доплером
         t_bit = 1/(fCA + fCA*dop) #длительность бита
         return t_bit, fd
+    
+    def get_phase(code_length, prn, fc, alpha):
+        TCAd = []
+        t_bit, fd = t_bit_signal(fc, alpha)
+        CA = get_code_prn(code_length, prn)
+        for  i in range(0, code_length-1):
+            if CA[i]*CA[i+1]<0:
+                TCAd.append(t_bit*(i+1))
+        return TCAd, fd
+
 
     #эталонные значения времени, где произошел сдвиг фаз
-    def get_phase(code_length, prn, fc):
-        t_bit, fd = t_bit_signal(fc)
+    '''def get_phase(code_length, prn, fc, alpha):
+        t_bit, fd = t_bit_signal(fc, alpha)
         CA = get_code_prn(code_length, prn)
         TCAd = []
-        for i in range(0, code_length):
-            b = t_bit*i
-            a = b - 1/fd/2
-            c = b + 1/fd/2
-            integ_window_1 = integrate.quad(get_signal, a, b, args=(CA,fc)) #интегрирование 1 окна от a до b
-            integ_window_2 = integrate.quad(get_signal, b, c, args=(CA,fc)) #интегрирование 2 окна от b до c
+        for i in range(1, code_length):
+            position_a = t_bit*i - 2.5/fd
+            position_b = t_bit*i
+            position_c = t_bit*i + 2.5/fd
+            integ_window_1 = integrate.quad(get_signal, position_a, position_b, args=(CA,fc, alpha)) #интегрирование 1 окна от a до b
+            integ_window_2 = integrate.quad(get_signal, position_b, position_c, args=(CA,fc, alpha)) #интегрирование 2 окна от b до c
             if integ_window_1[0]*integ_window_2[0] > 0:
-                if integ_window_1[0] < 0 and integ_window_2[0] <0:
-                    Td = b
-                if integ_window_1[0] > 0 and integ_window_2[0] > 0:
-                    Td = b
-                TCAd.append(Td)
-        return TCAd
+                TCAd.append(position_b)
+        return TCAd, fd'''
 
-    #доверительгый итервал для фаз
+    '''#доверительгый итервал для фаз #работает медленее, чем метод, описанный ниже 
     def span_phase(code_length, prn, fc):
         span_left = []
         span_right = []
         TCAd = get_phase(code_length, prn, fc)
         t_bit, fd = t_bit_signal(fc)
         for e in range(0, len(TCAd)-1):
-            span_left.append(TCAd[e] - 1/fd)
-            span_right.append(TCAd[e] + 1/fd)
+            span_left.append(TCAd[e] - (wlen/2)/fd)
+            span_right.append(TCAd[e] + (wlen/2)/fd)
         return span_left, span_right, TCAd
 
     span_left, span_right, TCAd = span_phase(code_length, prn, fc)
     t_i, ca_bit = restore_code(code_length, prn, fc, wch, wlen, step1)
     phase = 0
-    for j in range(0, len(span_right)-1):
-        for i in range(0, len(t_i)-1):
+    for j in range(0, len(span_right)):
+        for i in range(0, len(t_i)):
             if t_i[i] > span_left[j]  and t_i[i] < span_right[j] :
                 phase +=1
-    phase = abs(len(t_i) - phase)
-    return phase, t_i, TCAd
+                break'''
+
+    TCAd, fd = get_phase(code_length, prn, fc, alpha) #эталонный массив времени
+    t, ca_bit = restore_code(code_length, prn, fc, wch, wlen, step1, alpha) #восстановленный массив времи
+    correct = 0
+    wrong = 0
+    i = 0
+    j = 0
+    while i < len(TCAd):
+        if t[j] > (TCAd[i] - wlen/fd) and t[j] < (TCAd[i] + wlen/fd):
+            correct +=1
+            i+=1
+            j+=1
+        elif t[j] < (TCAd[i] - (1/fd)):
+            wrong+=1
+            j+=1
+        elif t[j] > (TCAd[i] + (1/fd)):
+            wrong+=1
+            i+=1
+    shortage = len(TCAd)-correct
+    waste = len(t)-len(TCAd)
+    return correct, wrong, t, TCAd, shortage, waste
+#correct - кол-во правильно определенных фаз
+#wrong - кол-во неправильных определенных фаз
+#waste - кол-во ошибок излишнрих фаз
+#shortage - кол-во ошибок не попавшие в инт-л
+#t_i - кол-во вос-х фаз
+#TCAd - кол-во эт-х фаз
+
+#ошибки
+def get_tested_phase_detector(code_length, prn, fc, wch, wlen, step1, alpha):
+    error_bit, CA, ca_bit = error_CA(code_length, prn, fc, wch, wlen, step1, alpha)
+    correct, wrong, t, TCAd, shortage, waste = error_phase(code_length, prn, fc, wch, wlen, step1, alpha)
+    return {'correct_code': len(CA),
+            'restored_code': len(ca_bit),
+            'error bit': error_bit/code_length,
+            'wrong phase': shortage/len(TCAd),
+            'waste phase': waste/len(TCAd),
+            'correct_phase': len(TCAd),
+            'restored_phase': len(t),
+            #'up_errors': 0,
+            #'down_errors': 0,
+            #'nochange_errors': 0,
+            }
+
+code_length = 1023 #длина кодовой последовательности
+prn=32 #номер спутника
+fc=f1 #частота несущей
+wch=6 #длина области для интегрирования
+wlen=3 #длина окон интегрирования
+step1=1/6 #шаг окон для интегрирования
+alpha=45 #угол возвышения спутника
 
 #phase - кол-во несовпадений сдвиг фаз
 #t_i - точки времени сдвигов фаз restored_code
@@ -175,32 +235,5 @@ def error_phase(code_length, prn, fc, wch, wlen, step1):
 #error_bit - кол-во несовпадений бит
 #CA - СА код
 #ca_bit - восстановленный СА код
-#code_length - длина кода
-#prn - номер спутника
-#fc - несущая частота
-#wch - область интегрирования
-#wlen - окна интегрировнаия
-#step1 - шаг окон интегрирования
 
-code_length = 1023 
-prn=19
-fc=f1
-wch=6
-wlen=3
-step1=1/10
-
-#ошибки
-def get_tested_phase_detector(code_length, prn, fc, wch, wlen, step1):
-    error_bit, CA, ca_bit = error_CA(code_length, prn, fc, wch, wlen, step1)
-    phase, t_i_len, TCAd = error_phase(code_length, prn, fc, wch, wlen, step1)
-    TCAd_len = len(TCAd)
-    return {#'correct_code': CA,
-            #'restored_code': ca_bit,
-            'error_bit': round(error_bit/code_length, 2),
-            'error_phase': round(phase/TCAd_len, 2),
-            'up_errors': 0,
-            'down_errors': 0,
-            'nochange_errors': 0,
-            }
-
-print(get_tested_phase_detector(code_length, prn, fc, wch, wlen, step1))
+print('alpha', alpha, get_tested_phase_detector(code_length, prn, fc, wch, wlen, step1, alpha))
